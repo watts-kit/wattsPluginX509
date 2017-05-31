@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -43,7 +44,7 @@ var (
 	}
 
 	caCertificateTemplate = x509.Certificate{
-		SerialNumber:          getSerialNumber(),
+		SerialNumber: big.NewInt(0),
 		Subject:               caName,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
@@ -51,7 +52,6 @@ var (
 	}
 
 	userCertificateTemplate = x509.Certificate{
-		SerialNumber: getSerialNumber(),
 		Subject: pkix.Name{
 			Country:            []string{"EU"},
 			Organization:       []string{"INDIGO"},
@@ -77,10 +77,17 @@ func shortenIssuer(issuer string) string {
 	return issuer
 }
 
-func getSerialNumber() *big.Int {
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	l.Check(err, 1, "failed to generate serial number")
+func getSerialNumber(pi l.Input) *big.Int {
+	serialNumber := big.NewInt(0)
+
+	// we use the sha1 hash of watts_uid || time.Now as a serialNumber
+	uid := []byte(pi.WaTTSUserID)
+	currentTime, err := time.Now().MarshalText()
+	l.Check(err, 1, "marhaling time")
+	serialNumberData := append(uid, currentTime...)
+	hash := sha1.Sum(serialNumberData)
+	// we need to convert the fixed length array into a slice here using [:]
+	serialNumber.SetBytes(hash[:])
 	return serialNumber
 }
 
@@ -108,6 +115,8 @@ func initCA(pi l.Input) {
 	notBefore := time.Now()
 	caCertificateTemplate.NotBefore = notBefore
 	caCertificateTemplate.NotAfter = notBefore.Add(caCertificateValidity)
+	serialNumber := big.NewInt(0)
+	caCertificateTemplate.SerialNumber = serialNumber
 
 	// create ca certificate
 	derBytes, err := x509.CreateCertificate(rand.Reader, &caCertificateTemplate, &caCertificateTemplate, &privateKey.PublicKey, privateKey)
@@ -177,7 +186,7 @@ func readCA(pi l.Input) CA {
 	}
 }
 
-func createUserCertificate(pi l.Input, ca CA) (pem.Block, pem.Block) {
+func createUserCertificate(pi l.Input, serialNumber *big.Int, ca CA) (pem.Block, pem.Block) {
 
 	// generate rsa key for the user certificate
 	privateKey := generateRsaKeypair(userCertificateRsaBits, userKeyPasswordLength)
@@ -199,6 +208,7 @@ func createUserCertificate(pi l.Input, ca CA) (pem.Block, pem.Block) {
 	issuer := shortenIssuer(pi.UserInfo["iss"].(string))
 	commonName := subject + "@" + issuer
 	userCertificateTemplate.Subject.CommonName = commonName
+	userCertificateTemplate.SerialNumber = serialNumber
 
 	// create user certificate
 	derBytes, err := x509.CreateCertificate(rand.Reader, &userCertificateTemplate, &ca.CACertificate, &(privateKey.PublicKey), &ca.CAKey)
@@ -211,30 +221,29 @@ func createUserCertificate(pi l.Input, ca CA) (pem.Block, pem.Block) {
 }
 
 // --- api methods ---
-func isInitialized(pi l.Input) (o l.Output) {
-	o = l.Output{"isInitialized": true}
-
-	// ca dir
+func isInitialized(pi l.Input) l.Output {
+	initialized := true
 	caCertificateDir := pi.Conf["ca_dir"].(string)
-	_, err = os.Stat(caCertificateDir)
-	if os.IsNotExist(err) {
-		o = l.Output{"isInitialized": false}
+	caCertificatePath := filepath.Join(caCertificateDir, caCertificateName)
+	caKeyPath := filepath.Join(caCertificateDir, caCertificateKeyName)
+
+	if _, err = os.Stat(caCertificateDir); os.IsNotExist(err) {
+		initialized = false
+	}
+	if _, err = os.Stat(caCertificatePath); os.IsNotExist(err) {
+		initialized = false
+	}
+	if _, err = os.Stat(caKeyPath); os.IsNotExist(err) {
+		initialized = false
 	}
 
-	// ca certificate file
-	_, err = os.Stat(filepath.Join(caCertificateDir, caCertificateName))
-	if os.IsNotExist(err) {
-		o = l.Output{"isInitialized": false}
-	}
-
-	return
+	return l.Output{"isInitialized": initialized}
 }
 
 func initialize(pi l.Input) l.Output {
 	// create the ca dir
 	err = os.MkdirAll(pi.Conf["ca_dir"].(string), 0700)
 	l.Check(err, 1, "creating ca_dir")
-
 	initCA(pi)
 
 	return l.Output{"result": "ok"}
@@ -243,15 +252,18 @@ func initialize(pi l.Input) l.Output {
 func request(pi l.Input) l.Output {
 	// get our certificate for signing the user certificate
 	ca := readCA(pi)
+	serialNumber := getSerialNumber(pi)
+	serialNumberBytes, err := serialNumber.MarshalText()
+	l.Check(err, 1, "marhaling serialNumber")
 
-	certPEM, keyPEM := createUserCertificate(pi, ca)
+	certPEM, keyPEM := createUserCertificate(pi, serialNumber, ca)
 
 	credential := []l.Credential{
 		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(&ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
 		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(&certPEM)), 25, 64, "certificate.pem"),
 		l.TextFileCredential("Key", string(pem.EncodeToMemory(&keyPEM)), 15, 64, "key.pem"),
 	}
-	state := "certificate issued"
+	state := string(serialNumberBytes)
 	return l.PluginGoodRequest(credential, state)
 }
 
