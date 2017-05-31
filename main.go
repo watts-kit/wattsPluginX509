@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	l "git.scc.kit.edu/lukasburgey/wattsPluginLib"
 	"io/ioutil"
 	"math/big"
@@ -44,7 +45,7 @@ var (
 	}
 
 	caCertificateTemplate = x509.Certificate{
-		SerialNumber: big.NewInt(0),
+		SerialNumber:          big.NewInt(0),
 		Subject:               caName,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
@@ -253,7 +254,6 @@ func request(pi l.Input) l.Output {
 	// get our certificate for signing the user certificate
 	ca := readCA(pi)
 	serialNumber := getSerialNumber(pi)
-	serialNumberBytes, err := serialNumber.MarshalText()
 	l.Check(err, 1, "marhaling serialNumber")
 
 	certPEM, keyPEM := createUserCertificate(pi, serialNumber, ca)
@@ -263,12 +263,43 @@ func request(pi l.Input) l.Output {
 		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(&certPEM)), 25, 64, "certificate.pem"),
 		l.TextFileCredential("Key", string(pem.EncodeToMemory(&keyPEM)), 15, 64, "key.pem"),
 	}
-	state := string(serialNumberBytes)
+	state := serialNumber.Text(16)
 	return l.PluginGoodRequest(credential, state)
 }
 
 func revoke(pi l.Input) l.Output {
-	return l.PluginError("revoke not implemented")
+	caCertificateDir := pi.Conf["ca_dir"].(string)
+
+	ca := readCA(pi)
+
+	serialNumber := big.NewInt(0)
+	serialNumber.SetString(pi.CredentialState, 16)
+
+	revokedCertificate := pkix.RevokedCertificate{
+		SerialNumber:   serialNumber,
+		RevocationTime: time.Now(),
+	}
+	revokedCertificates := []pkix.RevokedCertificate{revokedCertificate}
+
+	// create certificate revocation list
+	// RFC 5280 Section 5.1.2.4
+	thisUpdate := time.Now()
+
+	// RFC 5280 Section 5.1.2.5
+	// the problem is that we don't know when we will next issue a crl
+	// so we just set to "in one year"
+	nextUpdate := time.Now().Add(365 * 24 * time.Hour)
+
+	// create the certificate revocation list
+	crlBytes, err := ca.CACertificate.CreateCRL(rand.Reader, &ca.CAKey, revokedCertificates, thisUpdate, nextUpdate)
+	l.Check(err, 1, "error creating certificate revocation list")
+
+	// write it to a file
+	fileName := filepath.Join(caCertificateDir, fmt.Sprintf("crl_%s.der", pi.CredentialState))
+	err = ioutil.WriteFile(fileName, crlBytes, 0600)
+	l.Check(err, 1, "error writing certificate revocation list")
+
+	return l.PluginGoodRevoke()
 }
 
 func main() {
