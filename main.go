@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	l "git.scc.kit.edu/lukasburgey/wattsPluginLib"
+	"git.scc.kit.edu/lukasburgey/wattsPluginLib/keyGen"
 	"github.com/alexflint/go-filemutex"
 	"io/ioutil"
 	"math/big"
@@ -19,10 +20,10 @@ import (
 
 // CA important ca parameters
 type CA struct {
-	CACertificate    x509.Certificate
-	CACertificatePEM pem.Block
-	CAKey            rsa.PrivateKey
-	CADir string
+	CACertificate    *x509.Certificate
+	CACertificatePEM *pem.Block
+	CAKey            *rsa.PrivateKey
+	CADir            string
 }
 
 const (
@@ -85,7 +86,7 @@ func (ca *CA) getSerialNumber(pi l.Input) *big.Int {
 
 	serialFileName := "serials"
 	serialFilePath := filepath.Join(ca.CADir, serialFileName)
-	lockPath := filepath.Join(ca.CADir	, serialFileName+".lock")
+	lockPath := filepath.Join(ca.CADir, serialFileName+".lock")
 	mutex, err := filemutex.New(lockPath)
 	l.Check(err, 1, "unable to initialize lock file")
 
@@ -117,25 +118,13 @@ func (ca *CA) getSerialNumber(pi l.Input) *big.Int {
 	// write the serialNumber to the file
 	serialFile, err := os.OpenFile(serialFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	l.Check(err, 1, "opening serial file")
-	defer func() {err = serialFile.Close(); l.Check(err, 1, "closing file")} ()
+	defer func() { err = serialFile.Close(); l.Check(err, 1, "closing file") }()
 
 	_, err = serialFile.Write(serialBytes)
 	l.Check(err, 1, "writing to serial file")
 
 	return serialNumber
 }
-
-func generateRsaKeypair(bits int, passwordLength int) (privateKey *rsa.PrivateKey) {
-	// generate the rsa key for the certificate
-	privateKey, err := rsa.GenerateKey(rand.Reader, bits)
-	l.Check(err, 1, "generating rsa key for certificate")
-
-	// TODO
-	if passwordLength > 0 {
-	}
-	return
-}
-
 
 // synchronized with a mutex
 // creates a new ca certificate and key
@@ -151,7 +140,7 @@ func initCA(pi l.Input) {
 	defer mutex.Unlock()
 
 	// create ca key
-	privateKey := generateRsaKeypair(caCertificateRsaBits, 0)
+	privateKey := keyGen.GenerateRSAKey(caCertificateRsaBits)
 
 	// set certificate valid duration
 	notBefore := time.Now()
@@ -171,7 +160,7 @@ func initCA(pi l.Input) {
 	}
 	caCertificatePath := filepath.Join(caCertificateDir, caCertificateName)
 	certOut, err := os.OpenFile(caCertificatePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	defer func() {err = certOut.Close(); l.Check(err, 1, "closing file")} ()
+	defer func() { err = certOut.Close(); l.Check(err, 1, "closing file") }()
 	l.Check(err, 1, "opening file for ca certificate")
 	err = pem.Encode(certOut, &caCertificatePEM)
 	l.Check(err, 1, "writing pem file for ca certificate")
@@ -183,7 +172,7 @@ func initCA(pi l.Input) {
 	}
 	caKeyPath := filepath.Join(caCertificateDir, caCertificateKeyName)
 	keyOut, err := os.OpenFile(caKeyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	defer func() {err = keyOut.Close(); l.Check(err, 1, "closing file")} ()
+	defer func() { err = keyOut.Close(); l.Check(err, 1, "closing file") }()
 	l.Check(err, 1, "opening file for ca key")
 	err = pem.Encode(keyOut, &caKeyPEM)
 	l.Check(err, 1, "pem encoding ca key")
@@ -222,21 +211,19 @@ func readCA(pi l.Input) CA {
 	l.Check(err, 1, "parsing ca key")
 
 	return CA{
-		CACertificate:    *caCertificate,
-		CACertificatePEM: *caCertificatePEM,
-		CAKey:            *privateKey,
-		CADir: caCertificateDir,
+		CACertificate:    caCertificate,
+		CACertificatePEM: caCertificatePEM,
+		CAKey:            privateKey,
+		CADir:            caCertificateDir,
 	}
 }
 
-func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (pem.Block, pem.Block) {
+func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (certificatePEM *pem.Block, privateKeyPEM *pem.Block) {
+	certificatePEM = new(pem.Block)
 
 	// generate rsa key for the user certificate
-	privateKey := generateRsaKeypair(userCertificateRsaBits, userKeyPasswordLength)
-	rsaKeyPEM := pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	}
+	privateKey := keyGen.GenerateRSAKey(userCertificateRsaBits)
+	privateKeyPEM = keyGen.MarshalRSAKeyPEM(privateKey)
 
 	// set certificate valid duration
 	validDuration, err := time.ParseDuration(pi.Conf["cert_valid_duration"].(string))
@@ -254,20 +241,21 @@ func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (pem.Bloc
 	userCertificateTemplate.SerialNumber = serialNumber
 
 	// create user certificate
-	derBytes, err := x509.CreateCertificate(rand.Reader, &userCertificateTemplate, &ca.CACertificate, &(privateKey.PublicKey), &ca.CAKey)
+	derBytes, err := x509.CreateCertificate(rand.Reader, &userCertificateTemplate, ca.CACertificate, &(privateKey.PublicKey), ca.CAKey)
 	l.Check(err, 1, "creating certificate")
 
-	return pem.Block{
+	*certificatePEM = pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: derBytes,
-	}, rsaKeyPEM
+	}
+	return
 }
 
 // synchronized with a mutex (across processes)
 func (ca *CA) updateCRL(revokedCertificate pkix.RevokedCertificate) {
 	// synchronize the access to updateCRL
 	crlName := "crl.der"
-	lockPath := filepath.Join(ca.CADir	, crlName+".lock")
+	lockPath := filepath.Join(ca.CADir, crlName+".lock")
 	mutex, err := filemutex.New(lockPath)
 	l.Check(err, 1, "unable to initialize lock file")
 	mutex.Lock()
@@ -351,9 +339,9 @@ func request(pi l.Input) l.Output {
 	certPEM, keyPEM := ca.createUserCertificate(pi, serialNumber)
 
 	credential := []l.Credential{
-		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(&ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
-		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(&certPEM)), 25, 64, "certificate.pem"),
-		l.TextFileCredential("Key", string(pem.EncodeToMemory(&keyPEM)), 15, 64, "key.pem"),
+		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
+		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(certPEM)), 25, 64, "certificate.pem"),
+		l.TextFileCredential("Key", string(pem.EncodeToMemory(keyPEM)), 15, 64, "key.pem"),
 	}
 	state := serialNumber.Text(16)
 	return l.PluginGoodRequest(credential, state)
