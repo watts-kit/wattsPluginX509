@@ -34,7 +34,7 @@ const (
 	// TODO make configurable
 	userCertificateRsaBits = 2048
 	// TODO make configurable
-	userKeyPasswordLength = 0
+	userKeyPasswordLength = 16
 	caCertificateName     = "WaTTS-CA-Certificate.pem"
 	caCertificateKeyName  = "WaTTS-CA-Certificate-Key.pem"
 )
@@ -218,12 +218,11 @@ func readCA(pi l.Input) CA {
 	}
 }
 
-func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (certificatePEM *pem.Block, privateKeyPEM *pem.Block) {
+func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (certificatePEM *pem.Block, privateKey *rsa.PrivateKey) {
 	certificatePEM = new(pem.Block)
 
 	// generate rsa key for the user certificate
-	privateKey := keyGen.GenerateRSAKey(userCertificateRsaBits)
-	privateKeyPEM = keyGen.MarshalRSAKeyPEM(privateKey)
+	privateKey = keyGen.GenerateRSAKey(userCertificateRsaBits)
 
 	// set certificate valid duration
 	validDuration, err := time.ParseDuration(pi.Conf["cert_valid_duration"].(string))
@@ -292,7 +291,7 @@ func (ca *CA) updateCRL(revokedCertificate pkix.RevokedCertificate) {
 	}
 
 	// create the certificate revocation list
-	crlBytes, err := ca.CACertificate.CreateCRL(rand.Reader, &ca.CAKey, revokedCertificates, thisUpdate, nextUpdate)
+	crlBytes, err := ca.CACertificate.CreateCRL(rand.Reader, ca.CAKey, revokedCertificates, thisUpdate, nextUpdate)
 	l.Check(err, 1, "error creating certificate revocation list")
 
 	// TODO check if this overwrites the old crl
@@ -336,13 +335,25 @@ func request(pi l.Input) l.Output {
 	serialNumber := ca.getSerialNumber(pi)
 	l.Check(err, 1, "marhaling serialNumber")
 
-	certPEM, keyPEM := ca.createUserCertificate(pi, serialNumber)
+	certificatePEM, privateKey := ca.createUserCertificate(pi, serialNumber)
 
 	credential := []l.Credential{
 		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
-		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(certPEM)), 25, 64, "certificate.pem"),
-		l.TextFileCredential("Key", string(pem.EncodeToMemory(keyPEM)), 15, 64, "key.pem"),
+		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(certificatePEM)), 25, 64, "certificate.pem"),
 	}
+	if userKeyPasswordLength > 0 {
+		password := keyGen.GeneratePassword(userKeyPasswordLength)
+
+		credential = append(
+			credential,
+			l.TextCredential("Password for key", password),
+			l.TextFileCredential("Private key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyEncryptedPEM(privateKey, password))), 15, 64, "key.pem"))
+	} else {
+		credential = append(
+			credential,
+			l.TextFileCredential("Privat key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyPEM(privateKey))), 15, 64, "key.pem"))
+	}
+
 	state := serialNumber.Text(16)
 	return l.PluginGoodRequest(credential, state)
 }
