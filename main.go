@@ -16,6 +16,7 @@ import (
 	"time"
 )
 
+// CA important ca parameters
 type CA struct {
 	CACertificate    x509.Certificate
 	CACertificatePEM pem.Block
@@ -131,7 +132,7 @@ func initCA(pi l.Input) {
 	}
 	caCertificatePath := filepath.Join(caCertificateDir, caCertificateName)
 	certOut, err := os.OpenFile(caCertificatePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	defer certOut.Close()
+	defer func() {err = certOut.Close(); l.Check(err, 1, "closing file")} ()
 	l.Check(err, 1, "opening file for ca certificate")
 	err = pem.Encode(certOut, &caCertificatePEM)
 	l.Check(err, 1, "writing pem file for ca certificate")
@@ -143,7 +144,7 @@ func initCA(pi l.Input) {
 	}
 	caKeyPath := filepath.Join(caCertificateDir, caCertificateKeyName)
 	keyOut, err := os.OpenFile(caKeyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	defer keyOut.Close()
+	defer func() {err = keyOut.Close(); l.Check(err, 1, "closing file")} ()
 	l.Check(err, 1, "opening file for ca key")
 	err = pem.Encode(keyOut, &caKeyPEM)
 	l.Check(err, 1, "pem encoding ca key")
