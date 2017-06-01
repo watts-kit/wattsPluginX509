@@ -218,11 +218,8 @@ func readCA(pi l.Input) CA {
 	}
 }
 
-func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (certificatePEM *pem.Block, privateKey *rsa.PrivateKey) {
+func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int, publicKey interface{}) (certificatePEM *pem.Block) {
 	certificatePEM = new(pem.Block)
-
-	// generate rsa key for the user certificate
-	privateKey = keyGen.GenerateRSAKey(userCertificateRsaBits)
 
 	// set certificate valid duration
 	validDuration, err := time.ParseDuration(pi.Conf["cert_valid_duration"].(string))
@@ -240,7 +237,8 @@ func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (certific
 	userCertificateTemplate.SerialNumber = serialNumber
 
 	// create user certificate
-	derBytes, err := x509.CreateCertificate(rand.Reader, &userCertificateTemplate, ca.CACertificate, &(privateKey.PublicKey), ca.CAKey)
+	derBytes, err := x509.CreateCertificate(
+		rand.Reader, &userCertificateTemplate, ca.CACertificate, publicKey, ca.CAKey)
 	l.Check(err, 1, "creating certificate")
 
 	*certificatePEM = pem.Block{
@@ -335,24 +333,52 @@ func request(pi l.Input) l.Output {
 	serialNumber := ca.getSerialNumber(pi)
 	l.Check(err, 1, "marhaling serialNumber")
 
-	certificatePEM, privateKey := ca.createUserCertificate(pi, serialNumber)
+	credential := []l.Credential{}
 
-	credential := []l.Credential{
-		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
-		l.TextFileCredential("Certificate", string(pem.EncodeToMemory(certificatePEM)), 25, 64, "certificate.pem"),
-	}
-	if userKeyPasswordLength > 0 {
-		password := keyGen.GeneratePassword(userKeyPasswordLength)
+	// if the user provided a public key we use it
+	// otherwise we generate a key pair
+	var publicKey interface{}
+	if pk, ok := pi.Params["pub_key"]; ok {
+		pemBytes := []byte(pk.(string))
+		publicKeyPEM, _ := pem.Decode(pemBytes)
+		if publicKeyPEM == nil {
+			l.PluginError("pem decoding user provided public key")
+		}
 
-		credential = append(
-			credential,
-			l.TextCredential("Password for key", password),
-			l.TextFileCredential("Private key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyEncryptedPEM(privateKey, password))), 15, 64, "key.pem"))
+		publicKey, err = x509.ParsePKIXPublicKey(publicKeyPEM.Bytes)
+		l.Check(err, 1, "parsing user provided public key")
+
 	} else {
-		credential = append(
-			credential,
-			l.TextFileCredential("Privat key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyPEM(privateKey))), 15, 64, "key.pem"))
+
+		// generate rsa key for the user certificate
+		privateKey := keyGen.GenerateRSAKey(userCertificateRsaBits)
+		publicKey = &privateKey.PublicKey
+
+
+		// encrypt the private key if needed
+		if userKeyPasswordLength > 0 {
+			password := keyGen.GeneratePassword(userKeyPasswordLength)
+
+			credential = append(
+				credential,
+				l.TextFileCredentialAuto("Private key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyEncryptedPEM(privateKey, password))), "key.pem"),
+				l.TextCredential("Password for key", password),
+			)
+		} else {
+			credential = append(
+				credential,
+				l.TextFileCredentialAuto("Privat key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyPEM(privateKey))), "key.pem"),
+			)
+		}
 	}
+
+	certificatePEM := ca.createUserCertificate(pi, serialNumber, publicKey)
+
+	credential = append(
+		credential,
+		l.TextFileCredentialAuto("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), "ca-certificate.pem"),
+		l.TextFileCredentialAuto("Certificate", string(pem.EncodeToMemory(certificatePEM)), "certificate.pem"),
+	)
 
 	state := serialNumber.Text(16)
 	return l.PluginGoodRequest(credential, state)
@@ -389,7 +415,11 @@ func main() {
 			l.ConfigParamsDescriptor{Name: "cert_valid_duration", Type: "string", Default: "264h"},
 			l.ConfigParamsDescriptor{Name: "ca_dir", Type: "string", Default: "/etc/tts/ca"},
 		},
-		RequestParams: []l.RequestParamsDescriptor{},
+		RequestParams: []l.RequestParamsDescriptor{
+			l.RequestParamsDescriptor{
+				Key: "pub_key", Name: "public key", Description: "RSA public key for the certificate (PEM encoded)", Type: "textarea",
+				Mandatory: false},
+		},
 	}
 	l.PluginRun(pluginDescriptor)
 }
