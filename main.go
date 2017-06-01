@@ -7,8 +7,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"fmt"
 	l "git.scc.kit.edu/lukasburgey/wattsPluginLib"
+	"github.com/alexflint/go-filemutex"
 	"io/ioutil"
 	"math/big"
 	"os"
@@ -20,6 +20,7 @@ type CA struct {
 	CACertificate    x509.Certificate
 	CACertificatePEM pem.Block
 	CAKey            rsa.PrivateKey
+	CADir string
 }
 
 const (
@@ -184,10 +185,11 @@ func readCA(pi l.Input) CA {
 		CACertificate:    *caCertificate,
 		CACertificatePEM: *caCertificatePEM,
 		CAKey:            *privateKey,
+		CADir: caCertificateDir,
 	}
 }
 
-func createUserCertificate(pi l.Input, serialNumber *big.Int, ca CA) (pem.Block, pem.Block) {
+func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (pem.Block, pem.Block) {
 
 	// generate rsa key for the user certificate
 	privateKey := generateRsaKeypair(userCertificateRsaBits, userKeyPasswordLength)
@@ -219,6 +221,56 @@ func createUserCertificate(pi l.Input, serialNumber *big.Int, ca CA) (pem.Block,
 		Type:  "CERTIFICATE",
 		Bytes: derBytes,
 	}, rsaKeyPEM
+}
+
+// synchronized with a mutex (across processes)
+func (ca *CA) updateCRL(revokedCertificate pkix.RevokedCertificate) {
+	// synchronize the access to updateCRL
+	lockPath := filepath.Join(ca.CADir	, "crl.der.lock")
+	mutex, err := filemutex.New(lockPath)
+	l.Check(err, 1, "unable to initialize lock file")
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	crlName := "crl.der"
+	crlPath := filepath.Join(ca.CADir, crlName)
+
+	// create certificate revocation list
+	// RFC 5280 Section 5.1.2.4
+	thisUpdate := time.Now()
+
+	// RFC 5280 Section 5.1.2.5
+	// the problem is that we don't know when we will next issue a crl
+	// so we just set to "in one year"
+	nextUpdate := time.Now().Add(365 * 24 * time.Hour)
+
+	var revokedCertificates []pkix.RevokedCertificate
+
+	// if there is no old crl we only revoke the current certificate
+	// if there is one we "append" to the crl
+	if _, err := os.Stat(crlPath); os.IsNotExist(err) {
+		revokedCertificates = []pkix.RevokedCertificate{revokedCertificate}
+
+	} else {
+		derBytes, err := ioutil.ReadFile(crlPath)
+		l.Check(err, 1, "reading old crl file")
+
+		certificateList, err := x509.ParseCRL(derBytes)
+		l.Check(err, 1, "parsing old crl file")
+
+		// TODO check signature of old crl
+
+		revokedCertificates = append(certificateList.TBSCertList.RevokedCertificates, revokedCertificate)
+	}
+
+	// create the certificate revocation list
+	crlBytes, err := ca.CACertificate.CreateCRL(rand.Reader, &ca.CAKey, revokedCertificates, thisUpdate, nextUpdate)
+	l.Check(err, 1, "error creating certificate revocation list")
+
+	// TODO check if this overwrites the old crl
+	// write it to a file
+	err = ioutil.WriteFile(crlPath, crlBytes, 0600)
+	l.Check(err, 1, "error writing certificate revocation list")
 }
 
 // --- api methods ---
@@ -256,7 +308,7 @@ func request(pi l.Input) l.Output {
 	serialNumber := getSerialNumber(pi)
 	l.Check(err, 1, "marhaling serialNumber")
 
-	certPEM, keyPEM := createUserCertificate(pi, serialNumber, ca)
+	certPEM, keyPEM := ca.createUserCertificate(pi, serialNumber)
 
 	credential := []l.Credential{
 		l.TextFileCredential("CA Certificate", string(pem.EncodeToMemory(&ca.CACertificatePEM)), 30, 64, "ca-certificate.pem"),
@@ -268,8 +320,6 @@ func request(pi l.Input) l.Output {
 }
 
 func revoke(pi l.Input) l.Output {
-	caCertificateDir := pi.Conf["ca_dir"].(string)
-
 	ca := readCA(pi)
 
 	serialNumber := big.NewInt(0)
@@ -279,25 +329,8 @@ func revoke(pi l.Input) l.Output {
 		SerialNumber:   serialNumber,
 		RevocationTime: time.Now(),
 	}
-	revokedCertificates := []pkix.RevokedCertificate{revokedCertificate}
 
-	// create certificate revocation list
-	// RFC 5280 Section 5.1.2.4
-	thisUpdate := time.Now()
-
-	// RFC 5280 Section 5.1.2.5
-	// the problem is that we don't know when we will next issue a crl
-	// so we just set to "in one year"
-	nextUpdate := time.Now().Add(365 * 24 * time.Hour)
-
-	// create the certificate revocation list
-	crlBytes, err := ca.CACertificate.CreateCRL(rand.Reader, &ca.CAKey, revokedCertificates, thisUpdate, nextUpdate)
-	l.Check(err, 1, "error creating certificate revocation list")
-
-	// write it to a file
-	fileName := filepath.Join(caCertificateDir, fmt.Sprintf("crl_%s.der", pi.CredentialState))
-	err = ioutil.WriteFile(fileName, crlBytes, 0600)
-	l.Check(err, 1, "error writing certificate revocation list")
+	ca.updateCRL(revokedCertificate)
 
 	return l.PluginGoodRevoke()
 }
