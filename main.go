@@ -103,7 +103,6 @@ func (ca *CA) getSerialNumber(pi l.Input) *big.Int {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-
 	if _, err := os.Stat(serialFilePath); err == nil {
 		// check if the serial is already used
 		serialFileBytes, err := ioutil.ReadFile(serialFilePath)
@@ -137,11 +136,19 @@ func generateRsaKeypair(bits int, passwordLength int) (privateKey *rsa.PrivateKe
 	return
 }
 
+
+// synchronized with a mutex
 // creates a new ca certificate and key
 // after init readCA() can be used to load the ca
 func initCA(pi l.Input) {
 	// directory for the pem files to be saved
 	caCertificateDir := pi.Conf["ca_dir"].(string)
+	lockPath := filepath.Join(caCertificateDir, "ca.lock")
+	mutex, err := filemutex.New(lockPath)
+	l.Check(err, 1, "unable to initialize lock file")
+
+	mutex.Lock()
+	defer mutex.Unlock()
 
 	// create ca key
 	privateKey := generateRsaKeypair(caCertificateRsaBits, 0)
