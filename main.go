@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -80,9 +81,15 @@ func shortenIssuer(issuer string) string {
 	return issuer
 }
 
-func getSerialNumber(pi l.Input) *big.Int {
-	serialNumber := big.NewInt(0)
+func (ca *CA) getSerialNumber(pi l.Input) *big.Int {
 
+	serialFileName := "serials"
+	serialFilePath := filepath.Join(ca.CADir, serialFileName)
+	lockPath := filepath.Join(ca.CADir	, serialFileName+".lock")
+	mutex, err := filemutex.New(lockPath)
+	l.Check(err, 1, "unable to initialize lock file")
+
+	serialNumber := big.NewInt(0)
 	// we use the sha1 hash of watts_uid || time.Now as a serialNumber
 	uid := []byte(pi.WaTTSUserID)
 	currentTime, err := time.Now().MarshalText()
@@ -90,7 +97,32 @@ func getSerialNumber(pi l.Input) *big.Int {
 	serialNumberData := append(uid, currentTime...)
 	hash := sha1.Sum(serialNumberData)
 	// we need to convert the fixed length array into a slice here using [:]
-	serialNumber.SetBytes(hash[:])
+	serialBytes := hash[:]
+	serialNumber.SetBytes(serialBytes)
+
+	mutex.Lock()
+	defer mutex.Unlock()
+
+
+	if _, err := os.Stat(serialFilePath); err == nil {
+		// check if the serial is already used
+		serialFileBytes, err := ioutil.ReadFile(serialFilePath)
+		l.Check(err, 1, "reading serial file")
+
+		// if the sn is already taken we take a new currentTime and try again
+		if bytes.Contains(serialFileBytes, serialBytes) {
+			return ca.getSerialNumber(pi)
+		}
+	}
+
+	// write the serialNumber to the file
+	serialFile, err := os.OpenFile(serialFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	l.Check(err, 1, "opening serial file")
+	defer func() {err = serialFile.Close(); l.Check(err, 1, "closing file")} ()
+
+	_, err = serialFile.Write(serialBytes)
+	l.Check(err, 1, "writing to serial file")
+
 	return serialNumber
 }
 
@@ -227,13 +259,13 @@ func (ca *CA) createUserCertificate(pi l.Input, serialNumber *big.Int) (pem.Bloc
 // synchronized with a mutex (across processes)
 func (ca *CA) updateCRL(revokedCertificate pkix.RevokedCertificate) {
 	// synchronize the access to updateCRL
-	lockPath := filepath.Join(ca.CADir	, "crl.der.lock")
+	crlName := "crl.der"
+	lockPath := filepath.Join(ca.CADir	, crlName+".lock")
 	mutex, err := filemutex.New(lockPath)
 	l.Check(err, 1, "unable to initialize lock file")
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	crlName := "crl.der"
 	crlPath := filepath.Join(ca.CADir, crlName)
 
 	// create certificate revocation list
@@ -306,7 +338,7 @@ func initialize(pi l.Input) l.Output {
 func request(pi l.Input) l.Output {
 	// get our certificate for signing the user certificate
 	ca := readCA(pi)
-	serialNumber := getSerialNumber(pi)
+	serialNumber := ca.getSerialNumber(pi)
 	l.Check(err, 1, "marhaling serialNumber")
 
 	certPEM, keyPEM := ca.createUserCertificate(pi, serialNumber)
