@@ -1,0 +1,42 @@
+{
+	"exec_file": "wattsPluginX509",
+	"tests" : [
+		{
+			"input": {
+				"action": "request",
+				"conf_params": {
+					"ca_dir": "/home/burgey/tmp/ca",
+					"cert_valid_duration": "1h"
+				},
+				"params": {},
+				"user_info": {
+					"iss": "https://issuer.example.com",
+					"sub": "123456789"
+				},
+				"watts_version": "1.0.0"
+			},
+			"expected_output": {
+				"result": "ok"
+			}
+		},
+		{
+			"input": {
+				"action": "revoke",
+				"conf_params": {
+					"ca_dir": "/home/burgey/tmp/ca",
+					"cert_valid_duration": "1h"
+				},
+				"cred_state": "1258b3e2992b92dc8a0cedd47c0eb0399230c4ab",
+				"params": {},
+				"user_info": {
+					"iss": "https://issuer.example.com",
+					"sub": "123456789"
+				},
+				"watts_version": "1.0.0"
+			},
+			"expected_output": {
+				"result": "ok"
+			}
+		}
+	]
+}
