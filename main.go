@@ -8,9 +8,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	l "git.scc.kit.edu/lukasburgey/wattsPluginLib"
-	"git.scc.kit.edu/lukasburgey/wattsPluginLib/keyGen"
 	"github.com/alexflint/go-filemutex"
+	l "github.com/watts-kit/wattsPluginLib"
+	"github.com/watts-kit/wattsPluginLib/keyGen"
 	"io/ioutil"
 	"math/big"
 	"os"
@@ -354,20 +354,19 @@ func request(pi l.Input) l.Output {
 		privateKey := keyGen.GenerateRSAKey(userCertificateRsaBits)
 		publicKey = &privateKey.PublicKey
 
-
 		// encrypt the private key if needed
 		if userKeyPasswordLength > 0 {
 			password := keyGen.GeneratePassword(userKeyPasswordLength)
 
 			credential = append(
 				credential,
-				l.TextFileCredentialAuto("Private key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyEncryptedPEM(privateKey, password))), "key.pem"),
+				l.AutoTextFileCredential("Private key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyEncryptedPEM(privateKey, password))), "key.pem"),
 				l.TextCredential("Password for key", password),
 			)
 		} else {
 			credential = append(
 				credential,
-				l.TextFileCredentialAuto("Privat key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyPEM(privateKey))), "key.pem"),
+				l.AutoTextFileCredential("Privat key", string(pem.EncodeToMemory(keyGen.MarshalRSAKeyPEM(privateKey))), "key.pem"),
 			)
 		}
 	}
@@ -376,8 +375,8 @@ func request(pi l.Input) l.Output {
 
 	credential = append(
 		credential,
-		l.TextFileCredentialAuto("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), "ca-certificate.pem"),
-		l.TextFileCredentialAuto("Certificate", string(pem.EncodeToMemory(certificatePEM)), "certificate.pem"),
+		l.AutoTextFileCredential("CA Certificate", string(pem.EncodeToMemory(ca.CACertificatePEM)), "ca-certificate.pem"),
+		l.AutoTextFileCredential("Certificate", string(pem.EncodeToMemory(certificatePEM)), "certificate.pem"),
 	)
 
 	state := serialNumber.Text(16)
